@@ -19,17 +19,19 @@ class NERDetector:
 
     def __init__(self):
         """
-        Initialize the NER detector with spaCy's transformer model.
+        Initialize the NER detector with spaCy's model.
 
-        Loads the 'en_core_web_trf' model for high-accuracy entity recognition.
+        Loads the 'en_core_web_sm' model for entity recognition.
+        Falls back to downloading if not found (for Streamlit Cloud).
         """
         try:
-            self.nlp = spacy.load('en_core_web_trf')
+            self.nlp = spacy.load('en_core_web_sm')
         except OSError:
-            raise OSError(
-                "spaCy model 'en_core_web_trf' not found. "
-                "Please install it using: python -m spacy download en_core_web_trf"
-            )
+            # Auto-download for deployment environments
+            import subprocess
+            import sys
+            subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+            self.nlp = spacy.load('en_core_web_sm')
 
     def detect_entities(self, text: str) -> List[Dict]:
         """
