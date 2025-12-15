@@ -14,7 +14,7 @@ st.set_page_config(
 
 # Initialize chatbot and load documents
 @st.cache_resource
-def get_chatbot(_version=4):  # Increment version to force cache refresh
+def get_chatbot(_version=5):  # Increment version to force cache refresh (v5 = CoT enabled)
     bot = ChatBot()
     # Auto-load documents if collection is empty
     stats = bot.rag.get_collection_stats()
@@ -186,8 +186,8 @@ with col2:
 
         # Process the input
         with st.spinner(spinner_msg):
-            # Get response with prompt
-            response, prompt, metadata, message_type = bot.chat(user_input, return_prompt=True)
+            # Get response with prompt (CoT enabled by default)
+            response, prompt, metadata, message_type = bot.chat(user_input, return_prompt=True, use_cot=True)
 
             # Store in chat history
             st.session_state.messages.append({
@@ -201,6 +201,25 @@ with col2:
             # Display response
             st.markdown("### Analysis Result")
             st.info(response)
+
+            # Display Chain of Thought reasoning if available
+            classification_reasoning = metadata.get('classification_reasoning')
+            if classification_reasoning:
+                with st.expander("🧠 Classification Reasoning", expanded=False):
+                    st.markdown("**How this message was classified:**")
+                    st.text(classification_reasoning.format(include_header=False))
+
+            risk_reasoning = metadata.get('risk_reasoning')
+            if risk_reasoning:
+                with st.expander("⚠️ Risk Assessment Reasoning", expanded=False):
+                    st.markdown("**Step-by-step risk analysis:**")
+                    st.text(risk_reasoning.format(include_header=False))
+
+            rag_reasoning = metadata.get('rag_reasoning')
+            if rag_reasoning:
+                with st.expander("🔍 Multi-Step RAG Analysis", expanded=False):
+                    st.markdown("**How policy documents were retrieved:**")
+                    st.text(rag_reasoning.format(include_header=False))
 
             # Display prompt used in an expander
             if prompt:
@@ -293,15 +312,30 @@ if st.session_state.messages:
             st.markdown("**Output:**")
             st.info(msg['output'])
 
+            # Show Chain of Thought reasoning if available
+            metadata = msg.get('metadata', {})
+
+            classification_reasoning = metadata.get('classification_reasoning')
+            if classification_reasoning:
+                with st.expander("🧠 Classification Reasoning", expanded=False):
+                    st.text(classification_reasoning.format(include_header=False))
+
+            risk_reasoning = metadata.get('risk_reasoning')
+            if risk_reasoning:
+                with st.expander("⚠️ Risk Assessment", expanded=False):
+                    st.text(risk_reasoning.format(include_header=False))
+
+            rag_reasoning = metadata.get('rag_reasoning')
+            if rag_reasoning:
+                with st.expander("🔍 RAG Analysis", expanded=False):
+                    st.text(rag_reasoning.format(include_header=False))
+
             # Show prompt if available
             prompt = msg.get('prompt', '')
             if prompt:
                 with st.expander("🔧 View Prompt", expanded=False):
                     st.code(prompt, language="text")
                     st.caption(f"Prompt length: {len(prompt)} characters")
-
-            # Show metadata based on message type
-            metadata = msg.get('metadata', {})
 
             if message_type == 'pii_ticket':
                 # Show PII detections

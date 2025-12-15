@@ -19,8 +19,37 @@ Guidelines:
 - Focus on practical compliance steps
 - Always prioritize protecting individual privacy rights
 - Cite sources when providing regulatory guidance
+- Use step-by-step reasoning to ensure thorough analysis
 
 Maintain a professional, helpful tone while ensuring privacy protection remains the top priority."""
+
+# Chain of Thought enhanced system prompt
+COT_SYSTEM_PROMPT = """You are a Canadian Privacy Compliance Assistant specializing in personal information protection.
+
+Your expertise includes:
+- Canadian privacy legislation (PIPEDA, provincial privacy acts)
+- Protected Health Information (PHI) identification and handling
+- Personal Information Protection and Electronic Documents Act (PIPEDA) compliance
+- Provincial privacy laws (BC PIPA, Alberta PIPA, Quebec Law 25, etc.)
+- Privacy best practices for Canadian organizations
+
+IMPORTANT - Chain of Thought Reasoning:
+You MUST think step-by-step through problems:
+1. Break down complex questions into smaller parts
+2. Analyze each piece of information systematically
+3. Show your reasoning process clearly
+4. Connect findings to regulatory requirements
+5. Verify your conclusions against the provided context
+
+Guidelines:
+- Provide accurate, professional advice on Canadian privacy matters
+- Reference specific legislation and regulations when applicable
+- Show your analytical process transparently
+- Focus on practical compliance steps
+- Always prioritize protecting individual privacy rights
+- Cite sources when providing regulatory guidance
+
+Maintain a professional, helpful tone while ensuring privacy protection and transparent reasoning remain top priorities."""
 
 
 # Detection prompt - format PHI detection results with risk assessment
@@ -101,6 +130,128 @@ Provide a comprehensive answer to the question based on the retrieved policy con
    - Highlight key obligations or requirements
 
 Format your answer professionally with clear structure and citations."""
+
+
+# Chain of Thought enhanced prompts
+
+COT_DETECTION_PROMPT = """Analyze this support ticket for privacy compliance.
+
+**Ticket:**
+{ticket_text}
+
+**Detected PII:**
+{detections}
+
+**Risk Level:** {risk_level}
+
+**Applicable Regulations:**
+{policy_context}
+
+**Analysis:**
+
+**1. Data Classification**
+What PII is present and why does it matter?
+
+**2. Legal Requirements**
+Which Canadian privacy laws apply (PIPEDA, BC PIPA, etc.) and what do they require?
+
+**3. Risk Assessment**
+What specific harms could occur if this data is breached or mishandled?
+
+**4. Required Actions**
+Concrete steps required by law:
+- Encryption: Specify standard (e.g., AES-256)
+- Access controls: Who can access, how to verify
+- Retention: Maximum storage period per regulation
+- Breach notification: Timeline and requirements
+
+**5. Compliance Checklist**
+- [ ] Data encrypted at rest and in transit
+- [ ] Access logging enabled and monitored
+- [ ] Retention policy documented and enforced
+- [ ] User consent obtained and recorded
+- [ ] Breach response plan in place
+
+Focus on specific, measurable requirements. Cite regulation sections where applicable."""
+
+
+COT_POLICY_QUESTION_PROMPT = """Answer this privacy compliance question.
+
+**Question:**
+{question}
+
+**Regulations:**
+{retrieved_context}
+
+**Analysis:**
+
+**1. What the law requires:**
+Cite specific sections (e.g., PIPEDA Schedule 1, Principle 4.7)
+
+**2. Practical implementation:**
+Concrete steps organizations must take
+
+**3. Compliance verification:**
+How to measure/prove compliance (audits, logs, documentation)
+
+**4. Penalties for non-compliance:**
+Specific fines, sanctions, or consequences
+
+**Direct Answer:**
+[Provide clear, actionable answer with citations]
+
+**Note:** If regulations don't fully address this, state what's missing and recommend legal review."""
+
+
+COT_DEV_TICKET_PROMPT = """Technical compliance guidance for development teams.
+
+**Ticket:**
+{ticket_text}
+
+**Regulations:**
+{retrieved_context}
+
+**Technical Compliance Requirements:**
+
+**1. Data Classification**
+- PII type and sensitivity level
+- Which law applies: PIPEDA, PHIPA, BC PIPA, etc.
+- Regulatory citation
+
+**2. Mandatory Security Controls**
+*Encryption:*
+- At rest: Specify algorithm (e.g., AES-256-GCM)
+- In transit: TLS version (minimum TLS 1.2)
+- Key management: Where keys stored, rotation period
+
+*Access Control:*
+- Authentication method required (MFA, SSO)
+- Authorization model (RBAC, ABAC)
+- Session timeout limits
+
+*Audit Logging:*
+- What to log: Access, modifications, deletions
+- Retention period for logs
+- Log protection requirements
+
+**3. Data Lifecycle**
+- Consent: How obtained and recorded
+- Retention: Maximum period per regulation
+- Deletion: Secure erasure method
+- Breach notification: Timeline (e.g., 72 hours)
+
+**4. Implementation Checklist**
+- [ ] Encryption implemented and tested
+- [ ] Access controls configured
+- [ ] Audit logging enabled and verified
+- [ ] Consent workflow implemented
+- [ ] Data retention policy enforced
+- [ ] Breach response tested
+
+**5. Acceptance Criteria**
+How to verify compliance (specific tests, audit checks, documentation)
+
+Focus on measurable, testable requirements. Cite regulation sections."""
 
 
 # Risk level formatting helper
@@ -245,6 +396,82 @@ def build_complete_prompt(system_prompt: str, user_prompt: str) -> str:
         Complete prompt for LLM
     """
     return f"{system_prompt}\n\n---\n\n{user_prompt}"
+
+
+# Chain of Thought prompt builders
+
+def build_cot_detection_prompt(ticket_text: str, detections: list, risk_level: str, context_chunks: list = None) -> str:
+    """
+    Build CoT-enhanced detection analysis prompt.
+
+    Args:
+        ticket_text: The support ticket text
+        detections: List of detected personal information
+        risk_level: Overall risk level (LOW, MEDIUM, HIGH, CRITICAL)
+        context_chunks: Optional RAG context chunks (list of tuples)
+
+    Returns:
+        Complete formatted CoT prompt
+    """
+    formatted_detections = format_detections(detections)
+    risk_indicator = format_risk_indicator(risk_level)
+
+    # Format policy context if available
+    if context_chunks:
+        policy_context = format_rag_context(context_chunks)
+    else:
+        policy_context = "No specific policy context retrieved."
+
+    user_prompt = COT_DETECTION_PROMPT.format(
+        ticket_text=ticket_text,
+        detections=formatted_detections,
+        risk_level=risk_indicator,
+        policy_context=policy_context
+    )
+
+    return build_complete_prompt(COT_SYSTEM_PROMPT, user_prompt)
+
+
+def build_cot_policy_question_prompt(question: str, context_chunks: list) -> str:
+    """
+    Build CoT-enhanced policy question prompt.
+
+    Args:
+        question: User's question about privacy policy
+        context_chunks: Retrieved context from RAG system (list of tuples)
+
+    Returns:
+        Complete formatted CoT prompt
+    """
+    formatted_context = format_rag_context(context_chunks)
+
+    user_prompt = COT_POLICY_QUESTION_PROMPT.format(
+        question=question,
+        retrieved_context=formatted_context
+    )
+
+    return build_complete_prompt(COT_SYSTEM_PROMPT, user_prompt)
+
+
+def build_cot_dev_ticket_prompt(ticket_text: str, context_chunks: list) -> str:
+    """
+    Build CoT-enhanced development ticket prompt.
+
+    Args:
+        ticket_text: Development ticket text
+        context_chunks: Retrieved context from RAG system (list of tuples)
+
+    Returns:
+        Complete formatted CoT prompt
+    """
+    formatted_context = format_rag_context(context_chunks)
+
+    user_prompt = COT_DEV_TICKET_PROMPT.format(
+        ticket_text=ticket_text,
+        retrieved_context=formatted_context
+    )
+
+    return build_complete_prompt(COT_SYSTEM_PROMPT, user_prompt)
 
 
 if __name__ == "__main__":

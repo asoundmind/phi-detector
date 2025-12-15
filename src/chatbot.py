@@ -11,9 +11,19 @@ from .rag_system import RAGSystem
 from .ollama_client import OllamaClient
 from .prompt_templates import (
     SYSTEM_PROMPT,
+    COT_SYSTEM_PROMPT,
     build_detection_prompt,
     build_policy_question_prompt,
-    build_complete_prompt
+    build_complete_prompt,
+    build_cot_detection_prompt,
+    build_cot_policy_question_prompt,
+    build_cot_dev_ticket_prompt
+)
+from .chain_of_thought import (
+    ReasoningChain,
+    ClassificationReasoning,
+    RiskAssessmentReasoning,
+    ComplianceReasoning
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -78,21 +88,28 @@ class ChatBot:
             logger.error(f"Failed to initialize ChatBot: {e}")
             raise
 
-    def _classify_message(self, message: str) -> str:
+    def _classify_message(self, message: str, return_reasoning: bool = False):
         """
-        Classify message into one of three types:
+        Classify message into one of three types with optional reasoning chain.
         - 'pii_ticket': Support ticket with actual PII to detect
         - 'dev_ticket': Development/PM ticket about requirements and compliance
         - 'question': General policy question
 
         Args:
             message: Input message text
+            return_reasoning: If True, return tuple of (classification, reasoning_chain)
 
         Returns:
             Message type: 'pii_ticket', 'dev_ticket', or 'question'
+            Or tuple if return_reasoning is True
         """
         try:
             if not message or not message.strip():
+                if return_reasoning:
+                    chain = ReasoningChain("Message Classification")
+                    chain.add_step("Input validation", ["Message is empty"], "Default to question")
+                    chain.set_conclusion("question", "HIGH")
+                    return 'question', chain
                 return 'question'
 
             message_lower = message.lower()
@@ -104,15 +121,29 @@ class ChatBot:
             has_account = bool(re.search(r'\b(?:account|acct|patient)\s*#?\s*:?\s*[A-Z0-9]{5,}\b', message, re.IGNORECASE))
             has_dob = bool(re.search(r'\b(?:dob|date of birth|born)[\s:]+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', message_lower))
 
-            phi_count = sum([has_email, has_phone, has_ssn, has_account, has_dob])
+            patterns = {
+                'Email': has_email,
+                'Phone': has_phone,
+                'SSN': has_ssn,
+                'Account Number': has_account,
+                'Date of Birth': has_dob
+            }
+
+            phi_count = sum(patterns.values())
+
+            # Create PII pattern analysis reasoning
+            pii_chain = ClassificationReasoning.analyze_pii_patterns(message, patterns)
 
             # If has 2+ actual PII items, it's a support ticket with PII
             if phi_count >= 2:
                 logger.info("Classified as: PII Support Ticket")
+                if return_reasoning:
+                    pii_chain.set_conclusion("PII Support Ticket", "HIGH")
+                    return 'pii_ticket', pii_chain
                 return 'pii_ticket'
 
             # Check for development/PM ticket indicators
-            dev_indicators = [
+            dev_keywords = [
                 'pm ', 'product manager', 'project manager',
                 'developing', 'building', 'creating', 'implementing',
                 'feature', 'functionality', 'system', 'application',
@@ -124,26 +155,49 @@ class ChatBot:
                 'between user', 'between patient', 'between client'
             ]
 
-            has_dev_indicators = sum(1 for ind in dev_indicators if ind in message_lower)
+            found_indicators = [ind for ind in dev_keywords if ind in message_lower]
+            has_dev_indicators = len(found_indicators)
 
             # Check for question words (common in dev tickets)
             question_words = ['should', 'need', 'require', 'must', 'recommend', 'what', 'how']
             has_questions = any(qw in message_lower for qw in question_words)
 
+            # Create dev ticket analysis reasoning
+            dev_chain = ClassificationReasoning.analyze_dev_indicators(message, found_indicators, has_questions)
+
             # If it has dev indicators AND questions, it's a dev ticket
             if has_dev_indicators >= 2 and has_questions:
                 logger.info("Classified as: Development/Requirements Ticket")
+                if return_reasoning:
+                    # Combine both chains
+                    combined_chain = ReasoningChain("Complete Message Classification")
+                    combined_chain.steps.extend(pii_chain.steps)
+                    combined_chain.steps.extend(dev_chain.steps)
+                    combined_chain.set_conclusion("Development/Requirements Ticket", "HIGH")
+                    return 'dev_ticket', combined_chain
                 return 'dev_ticket'
 
             # Default to general question
             logger.info("Classified as: General Policy Question")
+            if return_reasoning:
+                combined_chain = ReasoningChain("Complete Message Classification")
+                combined_chain.steps.extend(pii_chain.steps)
+                if found_indicators or has_questions:
+                    combined_chain.steps.extend(dev_chain.steps)
+                combined_chain.set_conclusion("General Policy Question", "HIGH")
+                return 'question', combined_chain
             return 'question'
 
         except Exception as e:
             logger.error(f"Error in _classify_message: {e}")
+            if return_reasoning:
+                chain = ReasoningChain("Message Classification (Error)")
+                chain.add_step("Error occurred", [str(e)], "Default to question")
+                chain.set_conclusion("question", "LOW")
+                return 'question', chain
             return 'question'
 
-    def answer_dev_ticket(self, ticket_text: str, top_k: int = 3, return_prompt: bool = False):
+    def answer_dev_ticket(self, ticket_text: str, top_k: int = 3, return_prompt: bool = False, use_cot: bool = True):
         """
         Answer a development/PM ticket about technical requirements and compliance.
 
@@ -151,6 +205,7 @@ class ChatBot:
             ticket_text: Development ticket text
             top_k: Number of context chunks to retrieve
             return_prompt: If True, return tuple with prompt and metadata
+            use_cot: If True, use chain of thought prompting and multi-step RAG
 
         Returns:
             LLM-generated answer with policy guidance and technical recommendations
@@ -168,18 +223,36 @@ class ChatBot:
                     "Please ensure policy documents have been loaded into the system."
                 )
                 if return_prompt:
-                    return msg, "", []
+                    return msg, "", [], None
                 return msg
 
             logger.info(f"Retrieved {len(context_chunks)} relevant chunks")
 
-            # Build enhanced prompt for development requirements
-            context_text = "\n\n".join([
-                f"[Source: {metadata.get('source', 'Unknown').split('/')[-1]}]\n{text}"
-                for text, metadata, score in context_chunks
-            ])
+            # Use multi-step RAG analysis if CoT is enabled
+            rag_reasoning = None
+            if use_cot:
+                try:
+                    logger.info("Performing multi-step RAG analysis...")
+                    rag_reasoning, context_chunks = ComplianceReasoning.multi_step_analysis(
+                        ticket_text,
+                        context_chunks,
+                        self.rag
+                    )
+                    logger.info(f"Multi-step analysis complete: {len(context_chunks)} unique passages")
+                except Exception as e:
+                    logger.warning(f"Multi-step RAG failed, using initial context: {e}")
 
-            full_prompt = f"""You are a privacy compliance advisor helping development teams.
+            # Build prompt - use CoT prompt if enabled
+            if use_cot:
+                full_prompt = build_cot_dev_ticket_prompt(ticket_text, context_chunks)
+            else:
+                # Original prompt format
+                context_text = "\n\n".join([
+                    f"[Source: {metadata.get('source', 'Unknown').split('/')[-1]}]\n{text}"
+                    for text, metadata, score in context_chunks
+                ])
+
+                full_prompt = f"""You are a privacy compliance advisor helping development teams.
 
 DEVELOPMENT TICKET:
 {ticket_text}
@@ -200,20 +273,20 @@ Be specific and actionable in your recommendations."""
             logger.info("Generating LLM response...")
             response = self.llm.generate(
                 prompt=full_prompt,
-                max_tokens=600,  # More tokens for comprehensive guidance
+                max_tokens=800 if use_cot else 600,  # More tokens for CoT responses
                 temperature=0.4
             )
 
             if response:
                 if return_prompt:
-                    return response, full_prompt, context_chunks
+                    return response, full_prompt, context_chunks, rag_reasoning
                 return response
             else:
                 # Fallback
                 logger.warning("LLM generation failed, returning context directly")
                 fallback = self._format_basic_answer(ticket_text, context_chunks)
                 if return_prompt:
-                    return fallback, full_prompt, context_chunks
+                    return fallback, full_prompt, context_chunks, rag_reasoning
                 return fallback
 
         except ValueError as e:
@@ -223,14 +296,14 @@ Be specific and actionable in your recommendations."""
                 "Please load policy documents before processing development tickets."
             )
             if return_prompt:
-                return error_msg, "", []
+                return error_msg, "", [], None
             return error_msg
 
         except Exception as e:
             logger.error(f"Error processing development ticket: {e}")
             error_msg = f"Error processing development ticket: {str(e)}"
             if return_prompt:
-                return error_msg, "", []
+                return error_msg, "", [], None
             return error_msg
 
     def _is_ticket(self, message: str) -> bool:
@@ -247,23 +320,23 @@ Be specific and actionable in your recommendations."""
         msg_type = self._classify_message(message)
         return msg_type in ['pii_ticket', 'dev_ticket']
 
-    def _assess_risk_level(self, detections: List[Dict]) -> str:
+    def _assess_risk_level(self, detections: List[Dict], return_reasoning: bool = False):
         """
-        Assess overall risk level based on detected PHI types.
+        Assess overall risk level based on detected PHI types with optional reasoning.
 
         Args:
             detections: List of PHI detections
+            return_reasoning: If True, return tuple of (risk_level, reasoning_chain)
 
         Returns:
             Risk level: LOW, MEDIUM, HIGH, or CRITICAL
+            Or tuple if return_reasoning is True
         """
-        if not detections:
-            return "LOW"
-
-        # High-risk PHI types
+        # Critical-risk PHI types (highest sensitivity)
         critical_types = {
-            'SSN', 'MEDICAL_RECORD_NUMBER', 'HEALTH_PLAN_NUMBER',
-            'DIAGNOSIS_CODE', 'PRESCRIPTION'
+            'SSN', 'Social Insurance Number (SIN)', 'MEDICAL_RECORD_NUMBER',
+            'HEALTH_PLAN_NUMBER', 'Personal Health Number (PHN)',
+            'DIAGNOSIS_CODE', 'PRESCRIPTION', 'Credit Card Number'
         }
 
         high_risk_types = {
@@ -272,29 +345,44 @@ Be specific and actionable in your recommendations."""
         }
 
         medium_risk_types = {
-            'PERSON_NAME', 'PHONE_NUMBER', 'EMAIL',
-            'IP_ADDRESS', 'VEHICLE_ID'
+            'PERSON_NAME', 'NAME', 'Phone Number', 'PHONE_NUMBER', 'Email Address', 'EMAIL',
+            'IP Address', 'IP_ADDRESS', 'VEHICLE_ID', 'Postal Code'
         }
 
-        detected_types = {d['type'] for d in detections}
+        # Use CoT reasoning for risk assessment
+        risk_chain = RiskAssessmentReasoning.assess_risk(
+            detections,
+            critical_types,
+            high_risk_types,
+            medium_risk_types
+        )
 
-        # Check for critical PHI
-        if detected_types & critical_types:
-            return "CRITICAL"
+        # Extract the risk level from the conclusion
+        if not detections:
+            risk_level = "LOW"
+        else:
+            detected_types = {d['type'] for d in detections}
 
-        # Check for high-risk PHI
-        if detected_types & high_risk_types:
-            return "HIGH"
+            # Check for critical PHI
+            if detected_types & critical_types:
+                risk_level = "CRITICAL"
+            # Check for high-risk PHI
+            elif detected_types & high_risk_types:
+                risk_level = "HIGH"
+            # Check for medium-risk PHI
+            elif detected_types & medium_risk_types:
+                # If many medium-risk items, escalate to HIGH
+                if len(detections) > 5:
+                    risk_level = "HIGH"
+                else:
+                    risk_level = "MEDIUM"
+            else:
+                # Default to LOW
+                risk_level = "LOW"
 
-        # Check for medium-risk PHI
-        if detected_types & medium_risk_types:
-            # If many medium-risk items, escalate to HIGH
-            if len(detections) > 5:
-                return "HIGH"
-            return "MEDIUM"
-
-        # Default to LOW
-        return "LOW"
+        if return_reasoning:
+            return risk_level, risk_chain
+        return risk_level
 
     def _build_detection_prompt(
         self,
@@ -357,13 +445,14 @@ Be specific and actionable in your recommendations."""
             logger.error(f"Error building policy prompt: {e}")
             raise
 
-    def analyze_ticket(self, text: str, return_prompt: bool = False):
+    def analyze_ticket(self, text: str, return_prompt: bool = False, use_cot: bool = True):
         """
         Analyze a support ticket for PHI and privacy risks using RAG-grounded responses.
 
         Args:
             text: Support ticket text
-            return_prompt: If True, return tuple of (response, prompt, detections, risk_level, context_chunks)
+            return_prompt: If True, return tuple of (response, prompt, detections, risk_level, context_chunks, reasoning)
+            use_cot: If True, use chain of thought prompting and reasoning
 
         Returns:
             LLM-generated analysis of the ticket with risk assessment based on policy documents
@@ -377,8 +466,12 @@ Be specific and actionable in your recommendations."""
             detections = result.get('detections', [])
             logger.info(f"Found {len(detections)} PHI detections")
 
-            # Assess risk level
-            risk_level = self._assess_risk_level(detections)
+            # Assess risk level with reasoning
+            if use_cot:
+                risk_level, risk_reasoning = self._assess_risk_level(detections, return_reasoning=True)
+            else:
+                risk_level = self._assess_risk_level(detections)
+                risk_reasoning = None
             logger.info(f"Risk level: {risk_level}")
 
             # Build RAG query based on detected PII types and risk level
@@ -395,12 +488,17 @@ Be specific and actionable in your recommendations."""
 
             # Build enhanced prompt with policy context
             if context_chunks:
-                context_text = "\n\n".join([
-                    f"[Policy Source: {metadata.get('source', 'Unknown').split('/')[-1]}]\n{text}"
-                    for text, metadata, score in context_chunks
-                ])
+                if use_cot:
+                    # Use CoT prompt with RAG context
+                    full_prompt = build_cot_detection_prompt(text, detections, risk_level, context_chunks)
+                else:
+                    # Original prompt format
+                    context_text = "\n\n".join([
+                        f"[Policy Source: {metadata.get('source', 'Unknown').split('/')[-1]}]\n{text}"
+                        for text, metadata, score in context_chunks
+                    ])
 
-                full_prompt = f"""You are a privacy compliance advisor. Analyze this support ticket for PII and provide guidance based on Canadian privacy regulations.
+                    full_prompt = f"""You are a privacy compliance advisor. Analyze this support ticket for PII and provide guidance based on Canadian privacy regulations.
 
 SUPPORT TICKET:
 {text}
@@ -423,37 +521,40 @@ Based on the detected PII and the privacy regulations above, provide:
 Be specific and cite the relevant regulations."""
             else:
                 # Fallback if RAG fails
-                full_prompt = self._build_detection_prompt(
-                    ticket=text,
-                    detections=detections,
-                    risk=risk_level
-                )
+                if use_cot:
+                    full_prompt = build_cot_detection_prompt(text, detections, risk_level, context_chunks)
+                else:
+                    full_prompt = self._build_detection_prompt(
+                        ticket=text,
+                        detections=detections,
+                        risk=risk_level
+                    )
 
             # Generate response with LLM
             logger.info("Generating LLM response...")
             response = self.llm.generate(
                 prompt=full_prompt,
-                max_tokens=600,  # Increased for more comprehensive guidance
+                max_tokens=800 if use_cot else 600,  # More tokens for CoT responses
                 temperature=0.3  # Lower temperature for more consistent analysis
             )
 
             if response:
                 if return_prompt:
-                    return response, full_prompt, detections, risk_level, context_chunks
+                    return response, full_prompt, detections, risk_level, context_chunks, risk_reasoning
                 return response
             else:
                 # Fallback if LLM fails
                 logger.warning("LLM generation failed, returning basic analysis")
                 fallback = self._format_basic_detection(detections, risk_level)
                 if return_prompt:
-                    return fallback, full_prompt, detections, risk_level, context_chunks
+                    return fallback, full_prompt, detections, risk_level, context_chunks, risk_reasoning
                 return fallback
 
         except Exception as e:
             logger.error(f"Error analyzing ticket: {e}")
             error_msg = f"Error analyzing ticket: {str(e)}"
             if return_prompt:
-                return error_msg, "", [], "LOW", []
+                return error_msg, "", [], "LOW", [], None
             return error_msg
 
     def _format_detections_for_prompt(self, detections: List[Dict]) -> str:
@@ -466,7 +567,7 @@ Be specific and cite the relevant regulations."""
             lines.append(f"- {det['type']}: {det['value']}")
         return "\n".join(lines)
 
-    def answer_question(self, question: str, top_k: int = 2, return_prompt: bool = False):
+    def answer_question(self, question: str, top_k: int = 2, return_prompt: bool = False, use_cot: bool = True):
         """
         Answer a privacy policy question using RAG and LLM.
 
@@ -474,6 +575,7 @@ Be specific and cite the relevant regulations."""
             question: User's question about privacy policies
             top_k: Number of context chunks to retrieve
             return_prompt: If True, return tuple of (response, prompt, context_chunks)
+            use_cot: If True, use chain of thought prompting
 
         Returns:
             LLM-generated answer with citations
@@ -497,17 +599,20 @@ Be specific and cite the relevant regulations."""
 
             logger.info(f"Retrieved {len(context_chunks)} relevant chunks")
 
-            # Build policy question prompt using helper method
-            full_prompt = self._build_policy_prompt(
-                question=question,
-                rag_results=context_chunks
-            )
+            # Build policy question prompt - use CoT if enabled
+            if use_cot:
+                full_prompt = build_cot_policy_question_prompt(question, context_chunks)
+            else:
+                full_prompt = self._build_policy_prompt(
+                    question=question,
+                    rag_results=context_chunks
+                )
 
             # Generate response with LLM
             logger.info("Generating LLM response...")
             response = self.llm.generate(
                 prompt=full_prompt,
-                max_tokens=400,  # Reduced for faster response
+                max_tokens=600 if use_cot else 400,  # More tokens for CoT
                 temperature=0.4  # Slightly higher for more natural language
             )
 
@@ -541,13 +646,14 @@ Be specific and cite the relevant regulations."""
                 return error_msg, "", []
             return error_msg
 
-    def chat(self, message: str, return_prompt: bool = False):
+    def chat(self, message: str, return_prompt: bool = False, use_cot: bool = True):
         """
-        Main chat interface - routes messages to appropriate handler.
+        Main chat interface - routes messages to appropriate handler with CoT support.
 
         Args:
             message: User's input message
             return_prompt: If True, return tuple with prompt and metadata
+            use_cot: If True, use chain of thought reasoning and prompting
 
         Returns:
             ChatBot response (PII ticket, dev ticket, or question answer)
@@ -562,43 +668,63 @@ Be specific and cite the relevant regulations."""
 
             logger.info(f"Processing message (length: {len(message)} chars)")
 
-            # Classify message type
-            msg_type = self._classify_message(message)
+            # Classify message type with reasoning if CoT enabled
+            if use_cot and return_prompt:
+                msg_type, classification_reasoning = self._classify_message(message, return_reasoning=True)
+            else:
+                msg_type = self._classify_message(message)
+                classification_reasoning = None
             logger.info(f"Message classified as: {msg_type}")
 
             if msg_type == 'pii_ticket':
                 # Support ticket with actual PII
                 logger.info("Processing as PII support ticket")
                 if return_prompt:
-                    response, prompt, detections, risk_level, context_chunks = self.analyze_ticket(message, return_prompt=True)
+                    response, prompt, detections, risk_level, context_chunks, risk_reasoning = self.analyze_ticket(
+                        message, return_prompt=True, use_cot=use_cot
+                    )
                     metadata = {
                         'detections': detections,
                         'risk_level': risk_level,
-                        'context_chunks': context_chunks
+                        'context_chunks': context_chunks,
+                        'classification_reasoning': classification_reasoning,
+                        'risk_reasoning': risk_reasoning
                     }
                     return response, prompt, metadata, 'pii_ticket'
                 else:
-                    return self.analyze_ticket(message)
+                    return self.analyze_ticket(message, use_cot=use_cot)
 
             elif msg_type == 'dev_ticket':
                 # Development/PM ticket about requirements
                 logger.info("Processing as development/requirements ticket")
                 if return_prompt:
-                    response, prompt, context_chunks = self.answer_dev_ticket(message, return_prompt=True)
-                    metadata = {'context_chunks': context_chunks, 'ticket_type': 'development'}
+                    response, prompt, context_chunks, rag_reasoning = self.answer_dev_ticket(
+                        message, return_prompt=True, use_cot=use_cot
+                    )
+                    metadata = {
+                        'context_chunks': context_chunks,
+                        'ticket_type': 'development',
+                        'classification_reasoning': classification_reasoning,
+                        'rag_reasoning': rag_reasoning
+                    }
                     return response, prompt, metadata, 'dev_ticket'
                 else:
-                    return self.answer_dev_ticket(message)
+                    return self.answer_dev_ticket(message, use_cot=use_cot)
 
             else:
                 # General policy question
                 logger.info("Processing as policy question")
                 if return_prompt:
-                    response, prompt, context_chunks = self.answer_question(message, return_prompt=True)
-                    metadata = {'context_chunks': context_chunks}
+                    response, prompt, context_chunks = self.answer_question(
+                        message, return_prompt=True, use_cot=use_cot
+                    )
+                    metadata = {
+                        'context_chunks': context_chunks,
+                        'classification_reasoning': classification_reasoning
+                    }
                     return response, prompt, metadata, 'question'
                 else:
-                    return self.answer_question(message)
+                    return self.answer_question(message, use_cot=use_cot)
 
         except Exception as e:
             logger.error(f"Error in chat: {e}")
