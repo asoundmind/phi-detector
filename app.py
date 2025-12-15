@@ -14,11 +14,11 @@ st.set_page_config(
 
 # Initialize chatbot and load documents
 @st.cache_resource
-def get_chatbot(_version=7):  # Increment version to force cache refresh (v7 = OpenAI)
+def get_chatbot(_version=8):  # Increment version to force cache refresh (v8 = HuggingFace)
     # Get API key from Streamlit secrets or environment
     api_key = None
     try:
-        api_key = st.secrets.get("OPENAI_API_KEY")
+        api_key = st.secrets.get("HF_TOKEN")
     except:
         pass  # Will fall back to environment variable
 

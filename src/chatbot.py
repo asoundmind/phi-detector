@@ -8,7 +8,7 @@ from typing import Dict, Optional, List
 
 from .phi_detector import PHIDetector
 from .rag_system import RAGSystem
-from .openai_client import OpenAIClient
+from .huggingface_client import HuggingFaceClient
 from .prompt_templates import (
     SYSTEM_PROMPT,
     COT_SYSTEM_PROMPT,
@@ -40,7 +40,7 @@ class ChatBot:
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "meta-llama/Llama-3.2-3B-Instruct",
         api_key: Optional[str] = None,
         rag_collection: str = "privacy_policies",
         rag_persist_dir: str = "./chroma_db"
@@ -49,8 +49,8 @@ class ChatBot:
         Initialize the ChatBot with all required components.
 
         Args:
-            model: OpenAI model to use (default: gpt-4o-mini)
-            api_key: OpenAI API key (or set OPENAI_API_KEY env var)
+            model: Hugging Face model to use (default: Llama-3.2-3B-Instruct)
+            api_key: Hugging Face API token (or set HF_TOKEN env var)
             rag_collection: ChromaDB collection name
             rag_persist_dir: Directory for ChromaDB persistence
         """
@@ -68,9 +68,9 @@ class ChatBot:
                 persist_directory=rag_persist_dir
             )
 
-            # Initialize OpenAI Client
-            logger.info("Loading OpenAI Client...")
-            self.llm = OpenAIClient(
+            # Initialize Hugging Face Client
+            logger.info("Loading Hugging Face Client...")
+            self.llm = HuggingFaceClient(
                 model=model,
                 api_key=api_key
             )
@@ -78,7 +78,7 @@ class ChatBot:
             # Verify API is accessible
             if not self.llm.check_health():
                 logger.warning(
-                    "OpenAI API health check failed. The chatbot will work for detection "
+                    "Hugging Face API health check failed. The chatbot will work for detection "
                     "but LLM-enhanced responses will not be available."
                 )
 
