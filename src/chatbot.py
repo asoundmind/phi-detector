@@ -8,7 +8,7 @@ from typing import Dict, Optional, List
 
 from .phi_detector import PHIDetector
 from .rag_system import RAGSystem
-from .ollama_client import OllamaClient
+from .openai_client import OpenAIClient
 from .prompt_templates import (
     SYSTEM_PROMPT,
     COT_SYSTEM_PROMPT,
@@ -40,8 +40,8 @@ class ChatBot:
 
     def __init__(
         self,
-        model: str = "gemma2:2b",
-        ollama_base_url: str = "http://localhost:11434",
+        model: str = "gpt-4o-mini",
+        api_key: Optional[str] = None,
         rag_collection: str = "privacy_policies",
         rag_persist_dir: str = "./chroma_db"
     ):
@@ -49,8 +49,8 @@ class ChatBot:
         Initialize the ChatBot with all required components.
 
         Args:
-            model: Ollama model to use
-            ollama_base_url: Base URL for Ollama API
+            model: OpenAI model to use (default: gpt-4o-mini)
+            api_key: OpenAI API key (or set OPENAI_API_KEY env var)
             rag_collection: ChromaDB collection name
             rag_persist_dir: Directory for ChromaDB persistence
         """
@@ -68,17 +68,17 @@ class ChatBot:
                 persist_directory=rag_persist_dir
             )
 
-            # Initialize Ollama Client
-            logger.info("Loading Ollama Client...")
-            self.llm = OllamaClient(
+            # Initialize OpenAI Client
+            logger.info("Loading OpenAI Client...")
+            self.llm = OpenAIClient(
                 model=model,
-                base_url=ollama_base_url
+                api_key=api_key
             )
 
-            # Verify Ollama is running
+            # Verify API is accessible
             if not self.llm.check_health():
                 logger.warning(
-                    "Ollama health check failed. The chatbot will work for detection "
+                    "OpenAI API health check failed. The chatbot will work for detection "
                     "but LLM-enhanced responses will not be available."
                 )
 

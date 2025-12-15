@@ -53,6 +53,8 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
+# Streamlit secrets (contains API keys)
+.streamlit/secrets.toml
 
 # Chroma DB
 *.bin

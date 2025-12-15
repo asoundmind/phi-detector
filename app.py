@@ -14,8 +14,15 @@ st.set_page_config(
 
 # Initialize chatbot and load documents
 @st.cache_resource
-def get_chatbot(_version=5):  # Increment version to force cache refresh (v5 = CoT enabled)
-    bot = ChatBot()
+def get_chatbot(_version=7):  # Increment version to force cache refresh (v7 = OpenAI)
+    # Get API key from Streamlit secrets or environment
+    api_key = None
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except:
+        pass  # Will fall back to environment variable
+
+    bot = ChatBot(api_key=api_key)
     # Auto-load documents if collection is empty
     stats = bot.rag.get_collection_stats()
     if stats.get('total_chunks', 0) == 0:
