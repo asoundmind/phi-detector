@@ -22,16 +22,14 @@ class NERDetector:
         Initialize the NER detector with spaCy's model.
 
         Loads the 'en_core_web_sm' model for entity recognition.
-        Falls back to downloading if not found (for Streamlit Cloud).
         """
         try:
             self.nlp = spacy.load('en_core_web_sm')
         except OSError:
-            # Auto-download for deployment environments
-            import subprocess
-            import sys
-            subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-            self.nlp = spacy.load('en_core_web_sm')
+            raise OSError(
+                "spaCy model 'en_core_web_sm' not found. "
+                "It should be installed via requirements.txt"
+            )
 
     def detect_entities(self, text: str) -> List[Dict]:
         """
