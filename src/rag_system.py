@@ -147,7 +147,7 @@ class RAGSystem:
     def _chunk_text(
         self,
         text: str,
-        chunk_size: int = 500,
+        chunk_size: int = 200,
         overlap: int = 50
     ) -> List[str]:
         """

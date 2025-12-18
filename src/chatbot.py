@@ -68,6 +68,7 @@ class ChatBot:
                 persist_directory=rag_persist_dir
             )
 
+            # for deployment, using hugging face client
             # Initialize Hugging Face Client
             logger.info("Loading Hugging Face Client...")
             self.llm = HuggingFaceClient(
